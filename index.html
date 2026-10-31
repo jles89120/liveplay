@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#0b0d17">
 <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎶</text></svg>">
-<title>聲景即興 v5 · 三個音寫一首歌 + AI DJ</title>
+<title>聲景即興 v6 · 三個音寫一首歌 + AI DJ</title>
 <style>
 :root{--bg:#0b0d17;--panel:#141828;--panel2:#1b2036;--line:#2a3150;--txt:#e8ebff;--dim:#8d95c0;--acc:#7c6cff;--acc2:#22d3ee;--warm:#ff8a5c;--ok:#4ade80;--bad:#f87171}
 *{box-sizing:border-box}[hidden]{display:none!important}
@@ -75,7 +75,7 @@ footer{color:var(--dim);font-size:12px;text-align:center;margin-top:20px;line-he
 <div class="wrap">
   <header>
     <div>
-      <h1>聲景即興 v5 · 三個音，一首歌</h1>
+      <h1>聲景即興 v6 · 三個音，一首歌</h1>
       <p class="sub">隨便發出幾個音——哼歌、敲杯子、環境噪音都可以。App 會從中抓出 3–5 個「靈感音」，把它們寫成一首完整的流行歌，再由 AI DJ 把下一首新歌接進來，永不停歇。</p>
     </div>
   </header>
@@ -533,7 +533,8 @@ const DJ = { decks: [], cur: null, nxt: null, plan: null, fxPlans: [], job: null
 const idle = fn => (window.requestIdleCallback ? requestIdleCallback(fn, { timeout: 150 }) : setTimeout(fn, 0));
 const songEnd = D => D.startBar - D.offset + D.song.totalBars;
 function songInfo(s) { return { id: s.id, title: s.title.zh + ' / ' + s.title.en, seed: s.seed.label, seedSource: s.seed.source, key: s.keyLabel, bpm: s.bpm, style: s.style, form: s.form, bars: s.totalBars, sec: Math.round(s.duration),
-  chorusHook: s.sections.find(x => x.type === 'chorus').mel.slice(0, s.seed.midis.length).map(n => { const m = C.leadMidi(s, n); return C.spellPc(m, s.key) + (Math.floor(m / 12) - 1); }).join(' '),
+  hook: s.curation ? s.curation.label : null, hookKind: s.curation ? s.curation.kind : null, hookConf: s.curation ? s.curation.conf : null,
+  chorusHook: s.sections.find(x => x.type === 'chorus').mel.slice(0, (s.hookSrc || s.seed.midis).length).map(n => { const m = C.leadMidi(s, n); return C.spellPc(m, s.key) + (Math.floor(m / 12) - 1); }).join(' '),
   lift: s.lift, consonance: +s.harmStats.rate.toFixed(3), chorusChords: s.sections.find(x => x.type === 'chorus').harm.map(h => h.map(c => C.chordLabel(c, s.key)).join(' ')).join(' | ') }; }
 function pickStyle() { // 依麥克風特徵選風格；偶爾換成第二名，讓每首歌不同
   if (OFF.on && OFF.styles && OFF.styles.length) return OFF.styles.shift();
@@ -821,7 +822,7 @@ function drawDJ(now) {
     if (!song) { setT('d' + i + 't', D === DJ.nxt && DJ.job ? '下一首作曲中…' : '—'); setT('d' + i + 'e', '—'); setT('d' + i + 'm', '—'); setT('d' + i + 's', '—'); $('d' + i + 'p').style.width = '0%'; return; }
     setT('d' + i + 't', song.title.zh); setT('d' + i + 'e', song.title.en + ' · ' + song.styleLabel);
     setT('d' + i + 'm', song.keyLabel + ' · ' + song.bpm + ' BPM' + (D.active && D.sec ? ' · ' + C.SECTION_LABEL[D.sec.type] + (D.sec.final ? '（最後）' : '') + ' ' + (D.secBar + 1) + '/' + D.sec.bars : ''));
-    setT('d' + i + 's', '靈感：' + song.seed.label);
+    setT('d' + i + 's', '靈感：' + song.seed.label + (song.curation && song.curation.label !== song.seed.label ? ' → Hook：' + song.curation.label : ''));
     $('d' + i + 'p').style.width = (D.active ? clamp((D.localBar + 1) / song.totalBars, 0, 1) * 100 : 0).toFixed(1) + '%';
   });
   const gA = DJ.decks[0] ? DJ.decks[0].out.gain.value : 1, gB = DJ.decks[1] ? DJ.decks[1].out.gain.value : 0;
@@ -1025,6 +1026,8 @@ window.__renderOffline = async function (o = {}) {
 };
 window.__aiMusic = { S, DJ, STATS, LOAD, SB, get ctx() { return ctx; } };
 draw();
+// v6：頁面載入後先在閒置時間試寫幾首（讓瀏覽器預先最佳化作曲程式），第一首歌在排程器裡同步寫成時不會卡頓
+(window.requestIdleCallback || (f => setTimeout(f, 200)))(() => { try { const t0 = performance.now(); for (const [ms, st] of [[[69, 72, 76], 'folk'], [[61, 66, 63, 70], 'us'], [[55, 55, 62], 'kpop']]) C.composeSong(C.makeSeed(ms.map((m, i) => ({ m, len: i === ms.length - 1 ? 4 : 2 })), 'pitch', 1), { style: st, seed: 1 }); DBG.warmMs = +(performance.now() - t0).toFixed(1); } catch (e) { console.warn('warm-up', e); } });
 </script>
 </body>
 </html>

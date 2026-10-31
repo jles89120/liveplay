@@ -326,7 +326,7 @@
       const n = k.vals.length, dur = k.last - k.start + this.dt; if (dur < this.minDur || n < 3) return null;
       const md = median(k.vals); let sd = 0; for (const v of k.vals) sd += (v - md) ** 2; sd = Math.sqrt(sd / n);
       let w = 0; for (const x of k.w) w += x;
-      return { m: Math.round(md), t: k.start, dur, sal: w / n, stab: clamp(1 - sd / 0.35, 0, 1) };
+      return { m: Math.round(md), c: +(md - Math.round(md)).toFixed(2), t: k.start, dur, sal: w / n, stab: clamp(1 - sd / 0.35, 0, 1) }; // c：音準偏差（半音）
     }
     push(t, midi, prob = 1, level = 0.05, onset = false) {
       if (this.prevT != null) { const d = t - this.prevT; if (d > 0 && d < 0.2) this.dt += (d - this.dt) * 0.1; } this.prevT = t;
@@ -384,21 +384,21 @@
       const w = ns.slice(i, i + k); let okw = true, cons = 0;
       for (let j = 1; j < k; j++) {
         const gap = w[j].t - (w[j - 1].t + w[j - 1].dur), iv = Math.abs(w[j].m - w[j - 1].m);
-        if (gap > 1.0 || iv > 9) { okw = false; break; } if (CONSONANT.includes(iv)) cons++;
+        if (gap > 1.0 || iv > 12) { okw = false; break; } if (CONSONANT.includes(iv)) cons++; // v6：大跳交給整理步驟折疊
       }
       if (!okw) continue;
-      if (new Set(w.map(n => mod(n.m, 12))).size < 3) continue;
-      let lo = 999, hi = 0; for (const n of w) { lo = Math.min(lo, n.m); hi = Math.max(hi, n.m); } if (hi - lo > 14) continue;
+      const npc = new Set(w.map(n => mod(n.m, 12))).size; if (npc < 2) continue; // v6：兩個音高也可（整理步驟會補成好唱的 Hook）
+      let lo = 999, hi = 0; for (const n of w) { lo = Math.min(lo, n.m); hi = Math.max(hi, n.m); } if (hi - lo > 19) continue;
       const end = w[k - 1].t + w[k - 1].dur; if (end - w[0].t > 5) continue;
       let qs = 0; for (let j = 0; j < k; j++) qs += q[i + j]; qs /= k;
-      const sc = qs * (k === 3 ? 1.12 : k === 4 ? 1.04 : 1) + 0.08 * cons / (k - 1) + (now != null ? 0.12 * Math.exp(-Math.max(0, now - end) / 6) : 0);
+      const sc = qs * (k === 3 ? 1.12 : k === 4 ? 1.04 : 1) * (npc < 3 ? 0.8 : 1) * (hi - lo > 14 ? 0.85 : 1) + 0.08 * cons / (k - 1) + (now != null ? 0.12 * Math.exp(-Math.max(0, now - end) / 6) : 0);
       if (!best || sc > best.score) best = { i, k, score: sc, end };
     }
     if (!best) return null;
     const w = ns.slice(best.i, best.i + best.k), iois = [];
     for (let j = 1; j < w.length; j++) iois.push(w[j].t - w[j - 1].t);
     const lens = rhythmFromIOIs(iois, w[w.length - 1].dur);
-    return makeSeed(w.map((n, j) => ({ m: n.m, len: lens[j] })), 'pitch', best.score, { startT: w[0].t, endT: best.end });
+    return makeSeed(w.map((n, j) => ({ m: n.m, c: n.c || 0, len: lens[j] })), 'pitch', best.score, { startT: w[0].t, endT: best.end });
   }
   function rhythmFromOnsets(onsets, now) {
     const rec = onsets.filter(t => now - t < 6), iois = [];
@@ -730,6 +730,8 @@
     for (let i = 1; i < n; i++) { const iv = d[i] - d[i - 1];
       if (iv === 0) { run++; if (run > 3) p += 10; continue; } run = 1; nz++;
       const a = Math.abs(iv); if (a === 1) st++; else if (a >= 4) big++;
+      if ((a === 3 || a === 4) && TRI_PAIR.includes(mod(d[i], 7)) && TRI_PAIR.includes(mod(d[i - 1], 7))) p += 4; // v6：避免旋律三全音（大調 4↔7 級、小調 2↔6 級）
+      if (a >= 5) p += 3;
       if (a >= 3 && i + 1 < n) { const nx = d[i + 1] - d[i]; if (!(nx !== 0 && Math.sign(nx) === -Math.sign(iv) && Math.abs(nx) <= 2)) p += 3; }
     }
     if (nz) { p += 6 * Math.max(0, 0.7 - st / nz); p += 5 * Math.max(0, big / nz - 0.06); }
@@ -742,6 +744,7 @@
     if (o.prev != null && !(o.fix && o.fix[0] != null) && Math.abs(d[0] - o.prev) > 4) p += 1.5;
     if (o.end && !o.end.includes(mod(d[n - 1], 7))) p += 10;
     if (o.peakMin != null && mx < o.peakMin) p += 3 * (o.peakMin - mx);
+    if (o.next != null) p += 2 * Math.max(0, Math.abs(d[n - 1] - o.next) - 4); // v6：句尾離下一句開頭不要太遠（避免換句大跳）
     return p;
   }
   function genLine(rng, o) { let best = null; for (let t = 0; t < (o.tries || 40); t++) { const d = lineTry(rng, o), p = linePenalty(d, o); if (!best || p < best.p) best = { d, p }; if (p === 0) break; } return best.d; }
@@ -778,6 +781,7 @@
         if ((rel === 1 || rel === 3) && d <= hi && d >= lo && Math.abs(d - (i ? ph[i - 1].deg : d)) <= 3 && !(i >= 3 && [1, 2, 3].every(k => ph[i - k].deg === d)) && r0 < p) { x.deg = d; x.alt = 0; x.app = true; break; } } }
   }
   let REP_P = 0.06; // 同音重複機率（依曲風）
+  let TRI_PAIR = [3, 6]; // 形成三全音的兩個音級（依調式）
   // 打斷超過三個的連續同音（不動靈感音）
   function breakRuns(ph, lo, hi, tones) {
     const runAt = () => { let run = 1; for (let i = 1; i < ph.length; i++) { run = ph[i].deg === ph[i - 1].deg ? run + 1 : 1; if (run > 3) return i; } return -1; };
@@ -811,6 +815,119 @@
     const notes = seed.notes.map((n, i) => { const mm = ms[i] + shift, q = quantizeToScale(mm, key.tonic, key.mode); return { deg: midiToDegree(q, key.tonic, key.mode, 66), alt: mm - q, len: clamp(Math.round(n.len), 1, 8), midi: mm }; });
     return { shift, notes, len: sumLen(notes) };
   }
+  // ================= v6：靈感音整理（curation）=================
+  // 原始靈感音 → 量化到調內音 → 音級 → 重塑成好唱的 Hook（八度折疊、限制大跳、三全音／半音群改級進、流行節奏型）
+  // → 多個候選 Hook 評分取最佳；靈感音品質差（噪音、音準不穩）時改用流行 Hook 範本庫（保留靈感音的第一個音／方向）
+  const HOOK_TEMPLATES = [ // [音級（0 = 主音）, 節奏（十六分音符）]；通用的流行 Hook 輪廓
+    [[0, 2, 4], [2, 2, 4]], [[4, 2, 0], [2, 2, 4]], [[2, 1, 0], [3, 1, 4]], [[0, 1, 2], [2, 2, 4]], [[4, 5, 4, 2], [2, 1, 3, 4]],
+    [[2, 4, 5, 4], [2, 2, 2, 6]], [[0, -1, 0, 2], [3, 1, 2, 4]], [[4, 3, 2, 1], [2, 2, 2, 4]], [[2, 2, 1, 0], [2, 1, 3, 4]], [[5, 4, 2], [3, 3, 4]],
+    [[4, 4, 5, 4], [1, 1, 2, 4]], [[0, 4, 2], [4, 2, 4]], [[7, 6, 4], [2, 2, 6]], [[4, 5, 7, 5], [2, 2, 2, 4]], [[0, 2, 1, 0], [2, 2, 2, 6]],
+    [[2, 3, 4, 2], [2, 1, 3, 4]], [[4, 2, 3, 1], [3, 1, 2, 4]], [[0, 0, 2, 4], [1, 1, 2, 4]], [[5, 4, 3, 2], [2, 2, 2, 6]], [[2, 0, -1, 0], [3, 3, 2, 4]],
+    [[4, 7, 6, 4], [2, 2, 2, 4]], [[1, 2, 4, 2], [2, 1, 3, 4]], [[3, 2, 1, 2], [3, 1, 2, 4]], [[0, -2, -1, 0], [2, 2, 2, 4]], [[4, 6, 5, 4], [2, 1, 3, 4]],
+    [[2, 4, 3, 2], [3, 3, 2, 4]], [[0, 1, 2, 4], [2, 2, 2, 6]], [[4, 2, 1, 2, 0], [2, 1, 1, 2, 4]]
+  ];
+  const POP_RHYTHMS = { // 流行節奏型（長度合計 ≤ 16；最後一音較長）
+    3: [[2, 2, 4], [3, 3, 2], [3, 1, 4], [4, 2, 2], [2, 4, 2], [6, 2, 4], [3, 3, 4]],
+    4: [[2, 1, 1, 4], [3, 3, 2, 4], [2, 2, 2, 6], [1, 1, 2, 4], [3, 1, 2, 4], [2, 1, 3, 4], [4, 3, 1, 4]],
+    5: [[2, 1, 1, 2, 4], [3, 3, 2, 2, 4], [2, 2, 3, 1, 4], [1, 1, 2, 2, 6], [3, 1, 2, 2, 4]]
+  };
+  // 靈感音可信度 0–1（音高品質、音準、來源）
+  function seedConfidence(seed) {
+    if (seed.source === 'silence') return 0.1;
+    if (seed.source !== 'pitch') return clamp(0.35 - 0.1 * (seed.derived || 0), 0.1, 0.4);
+    const sc = clamp(((seed.score == null ? 1 : seed.score) - 0.3) / 0.6, 0.25, 1), cents = seed.notes.map(n => Math.abs(n.c || 0)), tune = 1 - clamp((Math.max(0, ...cents) - 0.25) / 0.25, 0, 0.6);
+    const distinct = new Set(seed.pcs).size / seed.pcs.length;
+    return clamp(sc * tune * (0.6 + 0.4 * distinct), 0.1, 1);
+  }
+  // 量化：依實際音高（含音準偏差 c）找最近的調內音
+  const seedPitch = n => n.m + (n.c || 0);
+  // Hook 評分（音級 d 為以 66 為基準的絕對音級）：級進、大跳回填、三全音、同音、音域、拱形輪廓、強拍／句尾和弦音
+  function hookScore(d, key) {
+    const n = d.length, ms = d.map(x => degreeToMidi(x, key.tonic, key.mode, 66)); let s = 0, run = 1, turns = 0, pdir = 0;
+    for (let i = 1; i < n; i++) { const a = Math.abs(d[i] - d[i - 1]), semi = Math.abs(ms[i] - ms[i - 1]), dir = Math.sign(d[i] - d[i - 1]);
+      const tri = [0, 2, 4].includes(mod(d[i], 7)) && [0, 2, 4].includes(mod(d[i - 1], 7)); // 主和弦分解（琶音）的跳進較自然
+      s += a === 0 ? -0.3 : a === 1 ? 1 : a === 2 ? 0.6 : a === 3 ? (tri ? 0.2 : -0.2) : a === 4 ? (tri ? -0.6 : -1.2) : -3;
+      if (semi === 6) s -= 3;
+      if (a >= 3) { const nx = i + 1 < n ? d[i + 1] - d[i] : null; if (nx != null) s += nx && Math.sign(nx) === -dir && Math.abs(nx) <= 2 ? 0.5 : -1; }
+      run = a === 0 ? run + 1 : 1; if (run >= 3) s -= 2;
+      if (dir) { if (pdir && dir !== pdir) turns++; pdir = dir; } }
+    const span = Math.max(...ms) - Math.min(...ms); if (span > 14) s -= 4; else if (span > 9) s -= 1.5; else if (span < 3 && n >= 3) s -= 1;
+    if (turns === 1) s += 0.6; else if (turns === 0 && n >= 4) s -= 0.3; else if (turns >= 3) s -= 0.5;
+    const mx = Math.max(...d), mi = d.indexOf(mx); if (mi === 1) s -= 0.6; else if (mi >= 2) s += 0.2; if ([0, 2, 4].includes(mod(mx, 7))) s += 0.3; // 最高音在第 2 個音（Hook 框架中必在弱拍）扣分
+    const f = mod(d[0], 7), l = mod(d[n - 1], 7);
+    s += [0, 2, 4].includes(f) ? 0.8 : f === 5 ? 0.4 : f === 6 ? -0.6 : 0;
+    s += [0, 2, 4].includes(l) ? 0.8 : [1, 5].includes(l) ? 0.3 : l === 3 ? -0.5 : l === 6 ? -0.4 : 0;
+    return s;
+  }
+  function rhythmScore(lens, seedLens, conf) {
+    const u = new Set(lens).size, L = lens.length; let s = (u >= 3 ? 0.8 : u === 2 ? 0.5 : 0) + (lens[L - 1] >= 4 ? 0.4 : 0);
+    for (let i = 0; i + 1 < L; i++) if (lens[i] === 3 && (lens[i + 1] === 1 || lens[i + 1] === 3)) { s += 0.4; break; }
+    if (seedLens) { let sim = 0; for (let i = 0; i < L; i++) sim -= Math.abs(Math.log2(lens[i] / clamp(seedLens[i] || 2, 1, 8))); s += 0.35 * conf * sim / L; }
+    return s;
+  }
+  // 由單一調性產生候選 Hook 並挑最佳
+  function curateInKey(seed, key, o = {}) {
+    const T = key.tonic, M = key.mode, conf = o.conf != null ? o.conf : seedConfidence(seed), rng = o.rng;
+    const q = seed.notes.map(n => midiToDegree(quantizeToScale(seedPitch(n), T, M), T, M, 66));
+    const fold = q.map((x, i) => x); for (let i = 1; i < fold.length; i++) { let b = fold[i], bd = 99; for (let k = -3; k <= 3; k++) { const c = q[i] + 7 * k, dd = Math.abs(c - fold[i - 1]) + (Math.sign(c - fold[i - 1]) === Math.sign(q[i] - q[i - 1]) ? 0 : 0.1); if (dd < bd) { bd = dd; b = c; } } fold[i] = b; }
+    // 保留方向、把大跳縮成四度以內
+    const keepDir = [q[0]]; for (let i = 1; i < q.length; i++) { const dv = q[i] - q[i - 1]; keepDir.push(keepDir[i - 1] + (Math.abs(dv) > 3 ? Math.sign(dv) * (mod(dv, 7) && Math.abs(dv) % 7 <= 3 ? Math.abs(dv) % 7 : 3) : dv)); }
+    const semi = (a, b) => Math.abs(degreeToMidi(a, T, M, 66) - degreeToMidi(b, T, M, 66));
+    const fixups = d => { const outs = [d]; // 三全音 → 級進；連續三個同音 → 第三音改級進
+      for (let i = 1; i < d.length; i++) { if (semi(d[i], d[i - 1]) === 6) for (const k of [1, -1]) { const e = d.slice(); e[i] += k; outs.push(e); }
+        if (i >= 2 && d[i] === d[i - 1] && d[i] === d[i - 2]) for (const k of [1, -1]) { const e = d.slice(); e[i] += k; outs.push(e); } }
+      return outs; };
+    const cands = []; const add = (d, kind, keep) => { if (d.length < 3 || d.length > 5) return; cands.push({ d, kind, keep }); };
+    for (const base of [fold, keepDir]) for (const f of fixups(base)) { add(f, 'seed'); if (f.length > 3) add(f.slice(0, 3), 'seed'); if (f.length > 4) add(f.slice(0, 4), 'seed');
+      const l = f[f.length - 1]; if (![0, 2, 4].includes(mod(l, 7)) && f.length < 5) for (const k of [1, -1]) if ([0, 2, 4].includes(mod(l + k, 7))) add(f.concat([l + k]), 'seed'); }
+    // 同音或只有兩個音高：用前兩音＋範本延伸
+    const f0 = fold[0], f1 = fold.length > 1 ? fold[1] : null;
+    for (const [td] of HOOK_TEMPLATES) for (const inv of [1, -1]) { const t = td.map(x => inv * (x - td[0]));
+      add(t.map(x => f0 + x), 'template');
+      if (f1 != null && t[1] === f1 - f0) add(t.map(x => f0 + x), 'reshaped');
+      if (f1 != null && t.length >= 3 && fold.length >= 3 && t[2] === fold[2] - f0 && t[1] === f1 - f0) add(t.map(x => f0 + x), 'seed'); }
+    const seedLens = seed.notes.map(n => n.len); let best = null;
+    const hard = d => d.some((x, i) => i && (semi(x, d[i - 1]) === 6 || Math.abs(x - d[i - 1]) > 4 || semi(x, d[i - 1]) > 7)) || Math.max(...d) - Math.min(...d) > 8; // 三全音、超過五度的跳進、超過九度的音域：不採用
+    for (const c of cands) { const d = c.d, n = d.length; let id = 0; if (hard(d)) continue; // 與原靈感音的相似度（前 3 音最重要）
+      for (let i = 1; i < Math.min(n, q.length); i++) { const same = mod(d[i], 7) === mod(fold[i], 7), dirOk = Math.sign(d[i] - d[i - 1]) === Math.sign(q[i] - q[i - 1]); id -= (same ? 0 : i === 1 ? 1.2 : i === 2 ? 1 : 0.3) + (dirOk ? 0 : 0.4); }
+      if (n < q.length) id -= 0.15 * (q.length - n); else if (n > q.length) id -= 0.1 * (n - q.length);
+      const hs = hookScore(d, key), s = hs + (1.2 + 2 * conf) * id + (rng ? 0.25 * rng() : 0); if (!best || s > best.s) best = { s, hs, id, d, kind: c.kind }; }
+    if (!best) best = { s: 0, hs: hookScore([f0, f0 + 1, f0], key), id: 0, d: [f0, f0 + 1, f0], kind: 'template' }; // 保險：理論上不會發生
+    // 實際保留了幾個靈感音（同音級、同方向）
+    let kept = 1; for (let i = 1; i < Math.min(best.d.length, q.length); i++) { if (mod(best.d[i], 7) === mod(fold[i], 7) && Math.sign(best.d[i] - best.d[i - 1]) === Math.sign(q[i] - q[i - 1])) kept++; else break; }
+    const kind = kept >= Math.min(3, q.length) ? 'seed' : kept >= 2 ? 'reshaped' : 'template';
+    // 節奏型
+    const n = best.d.length, rc = POP_RHYTHMS[n]; let rb = null; for (const r of rc) { const s = rhythmScore(r, seedLens, conf) + (rng ? 0.3 * rng() : 0); if (!rb || s > rb.s) rb = { s, r }; }
+    return { key, d: best.d, lens: rb.r, score: best.s, hookScore: best.hs, identity: best.id, kind, kept, conf, quant: q };
+  }
+  // 選調（與 Hook 一起評分）：調內擬合 + 整理後 Hook 的品質 + 曲風大小調傾向 + 與上一首的距離
+  function chooseKeyV6(seed, o = {}) {
+    const st = STYLES[o.style] || STYLES.folk, ms = seed.notes.map(seedPitch).map(Math.round), rank = fitKeys(ms, seed.notes.map(n => n.len)), top = rank[0].score, conf = seedConfidence(seed);
+    const pool = []; for (const c of rank) { if (c.score < top - 3 || pool.length >= 8) break; pool.push(c); }
+    for (const c of pool.slice()) { const rel = c.mode === 'major' ? { tonic: mod(c.tonic + 9, 12), mode: 'minor' } : { tonic: mod(c.tonic + 3, 12), mode: 'major' }; if (!pool.some(p => p.tonic === rel.tonic && p.mode === rel.mode)) pool.push(rank.find(r => r.tonic === rel.tonic && r.mode === rel.mode)); }
+    let best = null; const by = { major: null, minor: null }, ref = o.prevKey ? keyDistance(o.prevKey, rank[0]) : 99; // 轉調不比最佳擬合調更遠（DJ 銜接）
+    for (const c of pool) { if (o.prevKey && keyDistance(o.prevKey, c) > ref) continue; const k = { tonic: c.tonic, mode: c.mode }, cur = curateInKey(seed, k, { conf, rng: null });
+      let s = 0.5 * c.score + cur.score + (c.mode === 'minor' ? 1 : -1) * (st.minorBias - 1) * 2.5 + (c.mode === 'major' ? 0.6 : 0); // 流行歌大調為主（約 70%） if (o.prevKey) s -= 0.7 * keyDistance(o.prevKey, c);
+      if (!inScale(ms[0], c.tonic, c.mode)) s -= 4; if (ms.length > 1 && !inScale(ms[1], c.tonic, c.mode)) s -= 1.2; // 第一、二個靈感音盡量是調內音（才認得出來）
+      const r = { tonic: c.tonic, mode: c.mode, fit: c.score, s, degs: c.degs, cur }; if (!best || s > best.s) best = r; if (!by[c.mode] || s > by[c.mode].s) by[c.mode] = r; }
+    if (o.rng && by.major && by.minor) { // 大小調都合適時（差距小）才依曲風傾向隨機切換，保持曲目多樣
+      const pMin = clamp(0.3 * st.minorBias / 1.07, 0.15, 0.45), want = o.rng() < pMin ? 'minor' : 'major', alt = by[want];
+      if (alt && best.mode !== want && alt.s >= best.s - 1.2 && (!o.prevKey || keyDistance(o.prevKey, alt) <= ref)) best = alt; }
+    return best;
+  }
+  // 整理靈感音：回傳 { key, hk: { shift, notes, len }, info }
+  function curateSeed(seed, o = {}) {
+    const kc = o.key ? Object.assign({ fit: keyFitScore(seed.midis, o.key.tonic, o.key.mode) }, o.key) : chooseKeyV6(seed, o), key = { tonic: kc.tonic, mode: kc.mode };
+    const cur = curateInKey(seed, key, { rng: o.rng });
+    // 八度：Hook 盡量落在副歌音域（E4–E5），平均音高靠近 A♭4–A♯4
+    const base = cur.d.map(x => degreeToMidi(x, key.tonic, key.mode, 66)); let sh = 0, bd = Infinity;
+    for (let k = -3; k <= 3; k++) { let ov = 0, mean = 0; for (const m of base) { const x = m + 12 * k; ov += Math.max(0, MEL_MIDI.chorus[0] - x) + Math.max(0, x - MEL_MIDI.chorus[1]); mean += x; } mean /= base.length; const pk = Math.max(...base) + 12 * k, room = cur.d.indexOf(Math.max(...cur.d)) > 0 && pk > MEL_MIDI.chorus[1] - 2 ? 3 : 0; const dd = 10 * ov + Math.abs(mean - 70) + room; if (dd < bd) { bd = dd; sh = k; } } // 最高音不在第一音時，保留往上加一個強拍高音的空間
+    const notes = cur.d.map((x, i) => ({ deg: x + 7 * sh, alt: 0, len: cur.lens[i], midi: base[i] + 12 * sh }));
+    const m0 = Math.round(seedPitch(seed.notes[0])), shift = notes[0].midi - quantizeToScale(seedPitch(seed.notes[0]), key.tonic, key.mode); void m0;
+    const names = notes.map(x => spellPc(x.midi, key));
+    return { key: Object.assign({}, kc, { tonic: key.tonic, mode: key.mode }), hk: { shift: 12 * Math.round(shift / 12), notes, len: sumLen(notes) },
+      info: { kind: cur.kind, kept: cur.kept, conf: +cur.conf.toFixed(2), score: +cur.score.toFixed(2), hookScore: +cur.hookScore.toFixed(2), label: names.join(' – '), names, seedLabel: seed.label } };
+  }
   const degAtPos = (sec, pos) => { const b = clamp(pos >> 4, 0, sec.bars - 1), sp = sec.split && sec.split[b]; return sp != null && (pos & 15) >= 8 ? sp : sec.chords[b]; };
   const tonesAtPos = (sec, pos) => { const d = degAtPos(sec, pos); return sec.bor7 && d === 6 ? [1, 3] : chordToneDegs(d, 3); }; // ♭VII（借用）只取 2、4 級
   // 將樂句放到段落（第 off 小節開始）
@@ -821,7 +938,7 @@
   function composeMelodyV5(rng, song, X) {
     const S = song.sections, H = X.hook, n = H.length, cr = X.dr.chorus, vr = X.dr.verse, pr = X.dr.pre, br = X.dr.bridge, frame = X.frame, out = {};
     const chorus1 = S.find(s => s.type === 'chorus'), verse1 = S.find(s => s.type === 'verse');
-    REP_P = STYLES[song.style] && STYLES[song.style].repP != null ? STYLES[song.style].repP : 0.25;
+    REP_P = STYLES[song.style] && STYLES[song.style].repP != null ? STYLES[song.style].repP : 0.25; TRI_PAIR = song.key.mode === 'minor' ? [1, 5] : [3, 6];
     // ---- 副歌 H：靈感音（鎖定）＋ 補音；第二小節 ----
     // 副歌 A 句：Hook 若只佔 ≤ 8 個十六分音符，在同一句內重複兩次（第二小節再唱一次）
     const hookSpan = frame[n - 1][0] + frame[n - 1][1], twice = hookSpan <= 8;
@@ -834,7 +951,7 @@
     const seedMax = Math.max(...H.map(x => x.deg)), jmax = H.findIndex(x => x.deg === seedMax);
     const tonesC = off => pos => tonesAtPos(chorus1, off * 16 + pos);
     if (frame[jmax][0] % 8 !== 0) { const fi = hSlots.findIndex((s, i) => fix[i] == null && s[0] % 8 === 0); if (fi >= 0) { const t = tonesC(0)(hSlots[fi][0]), c = []; for (let d = seedMax + 1; d <= cr[1]; d++) if (t.includes(mod(d, 7))) c.push(d); if (c.length) fix[fi] = c[0]; } }
-    const hD = genLine(rng, { slots: hSlots, fix, lo: cr[0], hi: cr[1], tones: tonesC(0), contour: 'arch', end: tonesC(0)(hSlots[hSlots.length - 1][0]), peakMin: cr[1] - 2, tries: 120 });
+    const hD = genLine(rng, { slots: hSlots, fix, lo: cr[0], hi: cr[1], tones: tonesC(0), contour: 'arch', end: tonesC(0)(hSlots[hSlots.length - 1][0]), peakMin: cr[1] - 2, next: H[0].deg, tries: 120 });
     const isH = hSlots.map((_, i) => hookAt(i) >= 0), Hph = mkPh(hSlots, hD, { alts: hSlots.map((_, i) => hookAt(i) >= 0 ? H[hookAt(i)].alt : 0), hook: isH, seed: isH }); fixPeak(Hph, cr[0], cr[1], tonesC(0));
     breakRuns(Hph, cr[0], cr[1], tonesC(0)); appoggiatura(Hph, tonesC(0), pos => degAtPos(chorus1, pos), 1, rng, cr[0], cr[1], false); /* 句尾會在重複時改音，倒數第二音不做倚音 */ fixPeak(Hph, cr[0], cr[1], tonesC(0));
     const peakH = Math.max(...Hph.map(x => x.deg));
@@ -853,10 +970,13 @@
       const k = ph.filter(x => x.pos >= 16).length, r = variant(ph, off, sec, k, { lo: endSet ? Math.min(cr[0], 7 * Math.floor(peakH / 7)) : cr[0], hi: cr[1], maxDeg: peakH, contour: 'fall', end: endSet || undefined }); // 結尾主音不高過副歌最高點
       return r; };
     // 副歌 A A B A'：p0 = 鎖定 Hook 句、p1 = p0 只改最後一音、p2 = Hook 模進（上移 2 或 4 度）、p3 = p0、結束在主音
-    const lastTo = (ph, off, sec, set, avoid) => { const l = ph[ph.length - 1], hiL = Math.max(...ph.slice(0, -1).map(x => x.deg)), t = tonesAtPos(sec, off * 16 + l.pos).filter(x => set ? set.includes(x) : x !== mod(avoid, 7) && x !== 0);
+    const lastTo = (ph, off, sec, set, avoid, toward) => { const l = ph[ph.length - 1], hiL = Math.max(...ph.slice(0, -1).map(x => x.deg)), t = tonesAtPos(sec, off * 16 + l.pos).filter(x => set ? set.includes(x) : x !== mod(avoid, 7) && x !== 0);
       const lo = Math.min(cr[0], 7 * Math.floor(hiL / 7)); let d = snapIn(l.deg, t.length ? t : set || tonesAtPos(sec, off * 16 + l.pos), lo, Math.max(hiL, set ? lo + 7 : hiL), 0); if (!set && d === l.deg) d = snapIn(l.deg - 2, t, lo, hiL, -1);
       const p3 = ph.slice(-4, -1).map(x => x.deg); if (p3.length === 3 && p3.every(x => x === d)) d = snapIn(d - 1, (t.length ? t : tonesAtPos(sec, off * 16 + l.pos)).filter(x => x !== mod(d, 7)), lo, hiL, -1);
-      const fm = ph.slice(0, -1).findIndex(x => x.deg === hiL); if (ph[fm].pos % 8 && l.pos % 8 === 0) { const T2 = set || (t.length ? t : tonesAtPos(sec, off * 16 + l.pos)); for (let x = hiL + 1; x <= Math.min(cr[1], hiL + 3); x++) if (T2.includes(mod(x, 7))) { d = x; break; } } // 句中最高音在弱拍時，句尾改成更高的強拍音
+      const fm = ph.slice(0, -1).findIndex(x => x.deg === hiL); let raised = false; if (ph[fm].pos % 8 && l.pos % 8 === 0) { raised = true; const T2 = set || (t.length ? t : tonesAtPos(sec, off * 16 + l.pos)); for (let x = hiL + 1; x <= Math.min(cr[1], hiL + 3); x++) if (T2.includes(mod(x, 7))) { d = x; break; } } // 句中最高音在弱拍時，句尾改成更高的強拍音
+      if (toward != null && !raised && Math.abs(d - toward) > 5) { const T3 = t.length ? t : set || tonesAtPos(sec, off * 16 + l.pos), pv = ph.length > 1 ? ph[ph.length - 2].deg : d; let bb = null; // v6：句尾往下一句的開頭靠近
+        for (let x = Math.max(lo, toward - 4); x <= Math.min(hiL, toward + 4); x++) if (T3.includes(mod(x, 7)) && Math.abs(x - pv) <= 4 && (set || x !== d)) { const c = Math.abs(x - pv) + 0.5 * Math.abs(x - toward); if (!bb || c < bb.c) bb = { c, x }; }
+        if (bb && !(p3.length === 3 && p3.every(z => z === bb.x))) d = bb.x; }
       l.deg = d; l.alt = 0; l.hook = undefined; l.seed = undefined; return ph; };
     const copyPh = ph => ph.map(x => Object.assign({}, x, { keep: true }));
     // 副歌句子重複時，長的強拍音若與新位置的和弦成小二度，改用含此音、共同音最多的調內和弦（終止式小節不動）
@@ -875,15 +995,15 @@
     }
     function chorusPhrases(sec) {
       const P = [], nP = Math.max(1, sec.bars >> 1);
+      let seqSh = 2; if (nP > 2) { let best = null; for (const sh of [4, 2, -2]) { const mx = Math.max(...Hph.map(x => x.deg + sh)); if (mx > cr[1] && sh > 0) continue;
+          let sc = (sh === 4 ? 0.6 : sh === 2 ? 0.4 : -2) + rng() * 0.3; Hph.forEach(x => { if (isStrong(x.pos, x.len) && tonesAtPos(sec, 4 * 16 + x.pos).includes(mod(x.deg + sh, 7))) sc += 1; });
+          if (!best || sc > best.sc) best = { sh, sc }; } if (best) seqSh = best.sh; } // 模進的移動量先決定（第二句句尾可以往模進句的開頭靠近）
       for (let p = 0; p < nP; p++) { const off = 2 * p, last = p === nP - 1;
         if (p === 0) P.push(Hph.map(x => Object.assign({}, x)));
         else if (last) P.push(lastTo(copyPh(Hph), off, sec, [0]));
         else if (p === 2) { // 模進：整句上移 +2 或 +4 度（取強拍和弦音最多且不超過音域者）
-          let best = null; for (const sh of [4, 2, -2]) { const mx = Math.max(...Hph.map(x => x.deg + sh)); if (mx > cr[1] && sh > 0) continue;
-            let sc = (sh === 4 ? 0.6 : sh === 2 ? 0.4 : -2) + rng() * 0.3; Hph.forEach(x => { if (isStrong(x.pos, x.len) && tonesAtPos(sec, off * 16 + x.pos).includes(mod(x.deg + sh, 7))) sc += 1; });
-            if (!best || sc > best.sc) best = { sh, sc }; }
-          const sh = best ? best.sh : 2, q = Hph.map(x => Object.assign({}, x, { deg: x.deg + sh, alt: 0, hook: undefined, keep: true, seq: sh })); P.push(lastTo(q, off, sec, null, -99)); }
-        else P.push(lastTo(copyPh(Hph), off, sec, null, Hph[Hph.length - 1].deg));
+          const sh = seqSh, q = Hph.map(x => Object.assign({}, x, { deg: x.deg + sh, alt: 0, hook: undefined, keep: true, seq: sh })); P.push(lastTo(q, off, sec, null, -99, Hph[0].deg)); }
+        else P.push(lastTo(copyPh(Hph), off, sec, null, Hph[Hph.length - 1].deg, Hph[0].deg + (p + 1 === 2 ? seqSh : 0)));
       }
       return P;
     }
@@ -934,7 +1054,8 @@
     const introMel = sec => { const ph = resnap(Hph, sec, 0, cr[0], cr[1]), l = ph[ph.length - 1], t = tonesAtPos(sec, l.pos); // 前奏和弦不同：強拍音與句尾重新對齊
       if (!l.hook && !t.includes(mod(l.deg, 7))) { l.deg = snapIn(l.deg, t, cr[0], cr[1], -1); l.alt = 0; } return [ph].concat(sec.bars >= 4 ? [[]] : []); };
     function outroMel(sec) {
-      const sl = H.map((_, i) => [i * 4, 4]); sl.push([4 * n, 32 - 4 * n]);
+      const jm = H.findIndex(x => x.deg === Math.max(...H.map(y => y.deg))), sp = jm > 0 && (4 * jm) % 8 ? Math.min(4, Math.floor(8 / jm)) : 0; // v6：尾奏放慢的 Hook，最高音對齊第 3 拍
+      const sl = sp ? H.map((_, i) => i <= jm ? [8 - (jm - i) * sp, i < jm ? sp : 4] : [8 + (i - jm) * 4, 4]) : H.map((_, i) => [i * 4, 4]); { const e = sl[n - 1][0] + 4; sl.push([e, 32 - e]); }
       const t = pos => tonesAtPos(sec, pos), d = H.map(x => x.deg); let last = snapIn(d[n - 1] - 1, [0], X.dr.outro[0], X.dr.outro[1], -1); if (Math.abs(last - d[n - 1]) > 4) last = snapIn(d[n - 1], [0], X.dr.outro[0] - 3, X.dr.outro[1] + 3, -1);
       return [mkPh(sl, d.concat([last]), { alts: H.map(x => x.alt), hook: H.map(() => true) })].concat(sec.bars >= 4 ? [[]] : []);
     }
@@ -967,7 +1088,8 @@
   // 產生器：每次 next() 完成一小步（方便在 idle 時間分段計算）
   function* composeSongGen(seed, o = {}) {
     const rng = rng32(o.seed || 1), style = STYLES[o.style] ? o.style : 'folk', st = STYLES[style], HS = HARM_STYLE[style];
-    const key = o.key ? Object.assign({ fit: keyFitScore(seed.midis, o.key.tonic, o.key.mode) }, o.key) : chooseKey(seed, { style, prevKey: o.prevKey, rng });
+    const curated = o.curate === false ? null : curateSeed(seed, { style, prevKey: o.prevKey, rng, key: o.key }); // v6：整理靈感音（選調＋好唱的 Hook）
+    const key = curated ? curated.key : o.key ? Object.assign({ fit: keyFitScore(seed.midis, o.key.tonic, o.key.mode) }, o.key) : chooseKey(seed, { style, prevKey: o.prevKey, rng });
     const mode = key.mode;
     let bpm = o.bpm || lerp(st.bpm[0], st.bpm[1], clamp(o.intensity == null ? 0.5 : o.intensity, 0, 1));
     if (!o.bpm && o.tempoHint) bpm = lerp(bpm, clamp(o.tempoHint, st.bpm[0], st.bpm[1]), 0.5);
@@ -975,7 +1097,7 @@
     bpm = Math.round(o.bpm ? bpm : clamp(bpm, st.bpm[0], st.bpm[1]));                  // v5：一般 88–118、抒情 72–84
     const formId = o.form && FORMS[o.form] ? o.form : chooseForm(bpm, o.targetSec || 100, rng);
     yield 'key';
-    const hk = seedToHookV5(seed, key), H = hk.notes, kk = { tonic: key.tonic, mode };
+    const hk = curated ? curated.hk : seedToHookV5(seed, key), H = hk.notes, kk = { tonic: key.tonic, mode };
     const dr = {}; for (const t of ['verse', 'pre', 'chorus', 'bridge', 'intro', 'outro']) dr[t] = degSpan(kk, MEL_MIDI[t][0], MEL_MIDI[t][1]);
     const brSoft = degSpan(kk, MEL_MIDI.bridge[0], MEL_MIDI.bridgeSoft)[1];
     yield 'hook';
@@ -1015,7 +1137,7 @@
     if (lift) for (const s of sections.slice(fi)) { s.lift = lift; for (const n of s.mel) n.lift = lift; }
     yield 'lift';
     Object.assign(song, { title: songTitle(seed, style, rng), styleLabel: st.label, keyLabel: keyName(key.tonic, mode), keyFit: key.fit,
-      bpm, form: formId, totalBars: b0, hook: H, hookShift: hk.shift, progs, progScore: hf.s, seventh: st7, add9, intensity: o.intensity == null ? 0.5 : o.intensity,
+      bpm, form: formId, totalBars: b0, hook: H, hookShift: hk.shift, hookSrc: H.map(x => x.midi - hk.shift), curation: curated ? curated.info : null, progs, progScore: hf.s, seventh: st7, add9, intensity: o.intensity == null ? 0.5 : o.intensity,
       introBars: sections[0].type === 'intro' ? sections[0].bars : 0, outroBars: sections[sections.length - 1].type === 'outro' ? sections[sections.length - 1].bars : 0,
       finalStart: (sections.find(s => s.final) || sections[sections.length - 1]).start, duration: b0 * 240 / bpm,
       lift, endKey: { tonic: mod(key.tonic + lift, 12), mode }, rseed: (o.seed || 1) >>> 0, peakDeg: mres.peakH, v5: true });
@@ -1205,7 +1327,7 @@
         if (deg === 4 && R() < HS.sus) { const s4 = scaleChord(T, mode, 4, 'sus4'); if (s4 && harmFits(s4, base, mel, p0, p0 + 8)) { harm.push([Object.assign(s4, { s: 0, l: 8 }), Object.assign(c2, { s: 8, l: 8 })]); continue; } }
         harm.push([Object.assign(c1, { s: 0, l: 8 }), Object.assign(c2, { s: 8, l: 8 })]); continue;
       }
-      if (type === 'chorus' && !sec.final && b === bars - 1 && deg === 4 && mel.some(x => x.pos >= p0 && x.pos < p0 + 16 && x.len >= 2 && x.pc === T)) { const s7 = scaleChord(T, mode, 4, '7sus4') || scaleChord(T, mode, 4, 'sus4'); if (s7) { harm.push([Object.assign(s7, { s: 0, l: 16 })]); continue; } } // 副歌句尾唱主音、和弦在 V：V7sus4
+      if (type === 'chorus' && !sec.final && b === bars - 1 && deg === 4 && mel.some(x => x.pos >= p0 && x.pos < p0 + 16 && x.len >= 2 && x.pc === T)) { const s7 = scaleChord(T, mode, 4, '7sus4') || scaleChord(T, mode, 4, 'sus4'); if (s7) { if (mel.some(x => x.pos >= p0 && x.pos < p0 + 8 && (x.pos % 8 === 0 || x.len >= 4) && !s7.pcs.includes(x.pc))) harm.push([Object.assign(c, { s: 0, l: 8 }), Object.assign(s7, { s: 8, l: 8 })]); else harm.push([Object.assign(s7, { s: 0, l: 16 })]); continue; } } // v6：前半小節的強拍音不在 V7sus4 內時，前半用 V、後半才掛留 // 副歌句尾唱主音、和弦在 V：V7sus4
       if (sec.bor7 && mode === 'major' && deg === 6) { harm.push([Object.assign(borChord(T, mode, 6, R() < 0.3 ? 'add9' : 'tri') || borChord(T, mode, 6, 'tri'), { s: 0, l: 16, fixed: true })]); continue; } // ♭VII（借用，不計入借用和弦上限）
       const cad = next === 0 || b === bars - 1, hookBar = (type === 'chorus' || type === 'verse') && b === 0; let sub = null;
       if (mode === 'minor' && deg === 4 && R() < (cad ? 0.9 : 0.45)) sub = hmDom(T, R() < HS.p7 + 0.2);
@@ -1651,7 +1773,7 @@
     degreeToMidi, midiToDegree, diatonicChord, voiceChord, PROGRESSIONS, motifToIntervals,
     rng32, pick, PENTA, chordToneDegs, snapDeg, RHYTHMS, endingBar, STYLES, STYLE_IDS, styleWeights, SONG_FORM, SECTION_LABEL, SECTION_LEVEL, PRE_PROG, BRIDGE_PROG, buildPhrase, buildSectionMelody, chordName,
     median, spellPc, spectralPeaks, NoteTracker, rhythmFromIOIs, makeSeed, extractSeed, seedFromNoise, SeedCapture, DEG_W, keyFitScore, fitKeys, keyDistance, chooseKey,
-    FORMS, formBars, chooseForm, tSeq, tInv, tRetro, tAug, tDim, seedToHook, scoreProgression, chooseProgression, motifPhrase, composeSectionMelody, songTitle, composeSongGen, composeSong, sectionAt, leadMidi,
+    FORMS, formBars, chooseForm, tSeq, tInv, tRetro, tAug, tDim, seedToHook, scoreProgression, chooseProgression, motifPhrase, composeSectionMelody, songTitle, composeSongGen, HOOK_TEMPLATES, POP_RHYTHMS, seedConfidence, hookScore, curateInKey, chooseKeyV6, curateSeed, composeSong, sectionAt, leadMidi,
     arrange, DJ_TECH, DJ_IDS, planTransition, bpmAt, barsDuration, drumOwner,
     HARM_MINOR, QUAL, mkChord, scaleChord, hmDom, secDom, triSub, passDim, borChord, liftDom, chordInKey, chordLabel, HARM_STYLE, EXT, BASS_HINTS, harmViol, harmFits, colorSection, repairSection,
     melodyConsonance, melInfo, chordAtStep, closedVoicings, voiceMove, bestVoicing, voiceOne, voiceSong, counterLine, harmonizeSong, arrangeBar, LAYERS, layerCount, sectionDyn, DRUM_PAT, STRUM, gtrVoicing, barEvents, songEventDump, dist12 };
