@@ -1,0 +1,5 @@
+樂器取樣來源 / Sample sources
+- 鋼琴、吉他、貝斯、弦樂：FluidR3_GM SoundFont（Frank Wen 等，MIT License），
+  經 gleitz/midi-js-soundfonts 轉為 mp3（https://github.com/gleitz/midi-js-soundfonts）。
+- 鼓組：FluidR3_GM 打擊樂取樣，取自 surikov/webaudiofontdata（https://github.com/surikov/webaudiofontdata）。
+每個樂器保留每小三度一個取樣（C、E♭、F♯、A），播放時以 playbackRate 移調。
